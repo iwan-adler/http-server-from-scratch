@@ -1,5 +1,7 @@
 # minihttp: an HTTP/1.1 server from raw sockets
 
+[![tests](https://github.com/iwan-adler/http-server-from-scratch/actions/workflows/tests.yml/badge.svg)](https://github.com/iwan-adler/http-server-from-scratch/actions/workflows/tests.yml)
+
 An HTTP/1.1 server written in Python with **only the standard library's `socket` module**. It doesn't use `http.server`, any framework, or any third-party package. It parses requests byte by byte, routes them, serves static files, keeps connections alive, handles many clients at once, and rejects malformed or malicious input with the correct status codes.
 
 The goal is to understand what frameworks like FastAPI, and servers like Uvicorn or nginx, do underneath, and to show that understanding in code and tests.

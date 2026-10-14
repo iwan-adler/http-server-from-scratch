@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>minihttp chat</title>
+  <style>
+    :root { --bg: #f5f6f8; --surface: #fff; --text: #1b2330; --muted: #5d6675; --border: #dde1e7; --accent: #3156c8; --accent-text: #fff; --notice: #6b7280; color-scheme: light dark; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #12161c; --surface: #1b2129; --text: #e6e9ee; --muted: #9aa4b2; --border: #2d3540; --accent: #7b9cff; --accent-text: #0d1117; --notice: #9aa4b2; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 15px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+    main { max-width: 720px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; height: 100vh; gap: 12px; }
+    h1 { font-size: 1.15rem; margin: 0; }
+    input, button { font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+    button { cursor: pointer; } button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+    form { display: flex; gap: 8px; flex-wrap: wrap; } form input { flex: 1; min-width: 0; }
+    #log { flex: 1; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px; margin: 0; list-style: none; }
+    #log li { padding: 3px 0; overflow-wrap: anywhere; }
+    #log .notice { color: var(--notice); font-size: .9rem; font-style: italic; }
+    #log .error { color: #c0392b; font-size: .9rem; }
+    #log time { color: var(--muted); font-size: .8rem; margin-right: 6px; font-variant-numeric: tabular-nums; }
+    #status { color: var(--muted); font-size: .9rem; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>minihttp chat <span id="status" aria-live="polite"></span></h1>
+    <form id="join">
+      <input name="name" placeholder="Your name" maxlength="24" required aria-label="Your name">
+      <input name="room" placeholder="Room (e.g. general)" value="general" pattern="[a-z0-9-]{1,32}" required aria-label="Room">
+      <button class="primary">Join</button>
+    </form>
+    <ul id="log" aria-live="polite"></ul>
+    <form id="send" hidden>
+      <input name="text" placeholder="Message" maxlength="500" autocomplete="off" required aria-label="Message">
+      <button class="primary">Send</button>
+    </form>
+  </main>
+  <script src="/chat.js"></script>
+</body>
+</html>

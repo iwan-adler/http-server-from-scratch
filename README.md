@@ -4,6 +4,8 @@
 
 An HTTP/1.1 server written in Python with **only the standard library's `socket` module**. It doesn't use `http.server`, any framework, or any third-party package. It parses requests byte by byte, routes them, serves static files, keeps connections alive, handles many clients at once, and rejects malformed or malicious input with the correct status codes.
 
+It also implements **WebSockets (RFC 6455) from scratch**, and includes a multi-room **real-time chat** built on them.
+
 The goal is to understand what frameworks like FastAPI, and servers like Uvicorn or nginx, do underneath, and to show that understanding in code and tests.
 
 ```bash
@@ -43,6 +45,27 @@ All of these are implemented and tested.
 - Graceful shutdown that lets in-flight requests finish.
 - Access logs with status, size and latency.
 - A crashing handler returns a clean `500` and the server keeps running; the traceback goes only to the server log.
+
+**WebSockets** ([`minihttp/websocket.py`](minihttp/websocket.py))
+- **Opening handshake:** validates `Upgrade`, `Connection`, a 16-byte `Sec-WebSocket-Key` and version 13, and computes `Sec-WebSocket-Accept`. The result is checked against the RFC's own example. An unsupported version gets `426` with the supported version.
+- **Framing:**
+  - 7-, 16- and 64-bit payload lengths
+  - client masking **required**; server frames unmasked
+  - text and binary messages
+  - **fragmented messages**, with ping/pong/close frames allowed in between
+  - UTF-8 validation of text messages
+  - a 64 KB message limit
+- **Protocol violations get the correct close code:** `1002` for unmasked frames, reserved bits, unknown opcodes, oversized or fragmented control frames, and bad continuation frames; `1007` for invalid UTF-8; `1009` for oversized messages; `1011` when a handler crashes.
+- **Close handshake:** the client's close code is echoed, and invalid codes are reported as `1002`.
+- **Heartbeat:** if a client is silent for 20 s it gets a ping. With no reply after another 20 s, the connection is treated as dead and closed with `1001`.
+- **Graceful shutdown:** open WebSockets get a `1001 Going Away` close instead of blocking shutdown.
+
+**Chat demo** ([`minihttp/chat.py`](minihttp/chat.py), [`public/chat.html`](public/chat.html))
+- Rooms with user counts and join/leave notices, plus the last 50 messages sent to newcomers.
+- **Validation:** names, rooms, and JSON message shape and length. Bad messages get an error event; they don't drop the connection.
+- **Per-user rate limiting:** 10 messages per 10 s.
+- **Safe display:** an invalid name or room is refused with close code `1008`. The page renders messages with `textContent`; a message containing `<img onerror>` was tested in a real browser and displayed as text.
+- **Reconnection:** the page reconnects with exponential backoff.
 
 ## Security: rejecting bad input
 
@@ -104,14 +127,14 @@ flowchart LR
 
 ## Running it
 
-Requires Python 3.11 or newer; developed and tested on 3.14. The server has no dependencies; pytest is only needed for the tests.
+Requires Python 3.11 or newer; developed and tested on 3.14. The server has no dependencies. The tests need pytest, plus the independent `websockets` client library (`requirements-dev.txt`).
 
 ```bash
 git clone https://github.com/iwan-adler/http-server-from-scratch.git
 cd http-server-from-scratch
-python -m minihttp.demo --port 8080          # then open http://127.0.0.1:8080
+python -m minihttp.demo --port 8080          # then open http://127.0.0.1:8080 (chat: /chat.html)
 python bench/bench.py                         # benchmark
-python -m pip install pytest && python -m pytest
+python -m pip install -r requirements-dev.txt && python -m pytest
 ```
 
 Using it in your own code:
@@ -127,20 +150,32 @@ app = App()
 def greet(request):
     return Response.json({"hello": request.params["name"]})
 
+@app.websocket("/ws/echo")
+def echo(ws, request):
+    while (message := ws.recv()) is not None:   # None once the client disconnects
+        ws.send_text(message)
+
 Server(app, port=8080).serve_forever()
 ```
 
 ## Tests
 
-There are 57 tests, which run in about 6 seconds.
+There are 102 tests, which run in about 19 seconds.
 
 | File | Covers |
 |---|---|
 | `test_request.py` | Valid parsing, keep-alive rules for 1.0 and 1.1, 14 kinds of malformed request, every `Content-Length` and smuggling case, all size limits |
 | `test_app.py` | Path parameters, `405`/`Allow`, static files, MIME types, **6 path-traversal variants**, `304`, serialisation, header injection |
 | `test_server.py` | Over **real sockets**: keep-alive on one TCP connection, pipelining, HTTP/1.0, raw malformed bytes, a smuggling attempt, traversal over the wire, `HEAD`, a crashing handler, idle timeout, per-connection request cap, **8 slow requests running in parallel**, graceful shutdown |
+| `test_websocket.py` | The RFC handshake example, bad handshakes (`400`/`426`), every length encoding, echo through the **independent `websockets` library**, fragments with an interleaved ping, **11 protocol violations and their close codes** (sent by a raw client that misbehaves on purpose), close handshake, heartbeat timeout, handler crash → `1011`, 20 concurrent connections, shutdown with open WebSockets |
+| `test_chat.py` | Broadcast to one room only, capped history, leave notices, 6 kinds of invalid message, rate limiting with a fake clock, invalid names and rooms → `1008` |
 
 To check the tests themselves, I removed the traversal check (7 tests failed) and the conflicting-`Content-Length` check (2 tests failed).
+
+**Bugs the WebSocket tests found while I was building it:**
+- **The heartbeat would have broken the connection.** Python's buffered socket file refuses every read after a timeout, so WebSockets now read the raw socket, waiting with `select()`.
+- **Shutdown hung while a WebSocket was open,** because handlers only return when their connection ends. Shutdown now closes WebSockets with `1001`. Shutting a socket down from another thread doesn't wake `select()` on Windows, so waits happen in 0.25 s slices.
+- **A race between handshake and shutdown** let a connection close with `1000` instead of `1001`. That's fixed, and the test passed 10 of 10 runs afterwards.
 
 ## Limitations
 
@@ -148,6 +183,8 @@ These are deliberate scope choices, and each could be the next step:
 - **No TLS (HTTPS).** Put it behind a reverse proxy, or wrap the socket with `ssl`.
 - **No chunked transfer encoding** in requests (refused with `501`) or responses (bodies are buffered).
 - **No HTTP/2**, compression, range requests or `ETag`s.
-- **Thread-per-connection** scales to hundreds of connections, not tens of thousands (see *Concurrency model*).
+- **Thread-per-connection** scales to hundreds of connections, not tens of thousands (see *Concurrency model*). Each open **WebSocket keeps a worker for its whole life**, so `workers` caps concurrent WebSockets. A broadcast to a slow client also blocks the sender's thread briefly.
+- **No WebSocket extensions** (e.g. `permessage-deflate` compression) and no `wss://` (needs TLS).
+- **Chat state is in memory:** rooms and history are lost on restart.
 - **Static files are read fully into memory,** which is fine for small sites but wrong for large files (`sendfile` would fix it).
 - **IPv4 only** (`AF_INET`).

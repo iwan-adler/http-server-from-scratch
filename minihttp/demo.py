@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from minihttp.app import App
+from minihttp.chat import ChatRooms
 from minihttp.request import Request
 from minihttp.response import Response
 from minihttp.server import Server
@@ -42,6 +43,12 @@ def build_app() -> App:
     def boom(request: Request) -> Response:
         raise RuntimeError("deliberate failure to show 500 handling")
 
+    @app.websocket("/ws/echo")
+    def echo(ws, request: Request) -> None:
+        while (message := ws.recv()) is not None:
+            ws.send_text(message) if isinstance(message, str) else ws.send_bytes(message)
+
+    app.websocket("/ws/chat")(ChatRooms().handle)
     app.static("/", PUBLIC)
     return app
 

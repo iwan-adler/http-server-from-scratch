@@ -14,6 +14,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from minihttp import websocket
 from minihttp.request import HTTPError, read_request
 from minihttp.response import Response, serialize
 
@@ -29,11 +30,15 @@ class Server:
         workers: int = 32,
         idle_timeout: float = 5.0,
         max_requests_per_connection: int = 100,
+        websocket_heartbeat: float = 20.0,
     ) -> None:
         self.app = app
         self.host, self.port = host, port
         self.idle_timeout = idle_timeout
         self.max_requests = max_requests_per_connection
+        self.websocket_heartbeat = websocket_heartbeat
+        self._websockets: set = set()
+        self._websockets_lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="minihttp")
         self._stop = threading.Event()
         self._sock: socket.socket | None = None
@@ -81,6 +86,16 @@ class Server:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=2)
+        # WebSocket handlers only return when their connection ends, so end them:
+        # send 1001 Going Away and shut the socket down to wake any blocked read.
+        with self._websockets_lock:
+            open_sockets = list(self._websockets)
+        for ws in open_sockets:
+            ws.close(websocket.GOING_AWAY, "server shutting down")
+            try:
+                ws.sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
         self._pool.shutdown(wait=True, cancel_futures=True)
         if self._sock:
             self._sock.close()
@@ -103,6 +118,10 @@ class Server:
                     break
                 if request is None:
                     break  # client closed the connection
+                ws_handler = getattr(self.app, "match_websocket", lambda _: None)(request)
+                if ws_handler is not None:
+                    self._serve_websocket(conn, address, request, ws_handler)
+                    break  # the connection belonged to the WebSocket; it's finished now
                 started = time.perf_counter()
                 response = self._run_app(request)
                 keep_alive = request.keep_alive and served < self.max_requests and not self._stop.is_set()
@@ -121,6 +140,40 @@ class Server:
             except OSError:
                 pass
             conn.close()
+
+    def _serve_websocket(self, conn: socket.socket, address: tuple, request, handler) -> None:
+        """Upgrade the connection and hand it to handler(ws, request) on this worker thread.
+
+        Each open WebSocket occupies one worker for its whole lifetime, so the
+        worker count caps concurrent WebSockets (see README: Limitations).
+        """
+        response = websocket.handshake(request)
+        request_line = f"{request.method} {request.target} {request.version}"
+        if response.status != 101:
+            conn.sendall(serialize(response, keep_alive=False))
+            self._log(address, request_line, response.status, len(response.body), 0.0)
+            return
+        conn.sendall(websocket.handshake_bytes(response))
+        self._log(address, request_line, 101, 0, 0.0)
+        ws = websocket.WebSocket(conn, heartbeat=self.websocket_heartbeat)
+        with self._websockets_lock:
+            self._websockets.add(ws)
+        try:
+            if self._stop.is_set():
+                # Shutdown began between the handshake and registration, so shutdown()
+                # didn't see this socket: close it the same way it would have.
+                ws.close(websocket.GOING_AWAY, "server shutting down")
+                return
+            handler(ws, request)
+        except websocket.WebSocketClosed:
+            pass
+        except Exception:
+            logger.exception("websocket handler failed for %s", request.path)
+            ws.close(websocket.INTERNAL_ERROR, "internal error")
+        finally:
+            ws.close()
+            with self._websockets_lock:
+                self._websockets.discard(ws)
 
     def _run_app(self, request) -> Response:
         try:

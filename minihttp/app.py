@@ -28,6 +28,22 @@ class App:
     def __init__(self) -> None:
         self._routes: list[tuple[re.Pattern[str], set[str], Handler]] = []
         self._static: list[tuple[str, Path]] = []
+        self._websockets: list[tuple[re.Pattern[str], Callable]] = []
+
+    def websocket(self, pattern: str) -> Callable[[Callable], Callable]:
+        """Register handler(ws, request) for WebSocket upgrades on `pattern`."""
+        def register(handler: Callable) -> Callable:
+            self._websockets.append((compile_path(pattern), handler))
+            return handler
+        return register
+
+    def match_websocket(self, request: Request) -> Callable | None:
+        for pattern, handler in self._websockets:
+            match = pattern.match(request.path)
+            if match:
+                request.params = match.groupdict()
+                return handler
+        return None
 
     def route(self, pattern: str, methods: tuple[str, ...] = ("GET",)) -> Callable[[Handler], Handler]:
         def register(handler: Handler) -> Handler:
